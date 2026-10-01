@@ -1,208 +1,210 @@
-# AgriMarket-Intelligence
+import warnings
+warnings.filterwarnings("ignore")
 
-AgriMarket-Intelligence is a B.Tech CSE 5th Semester academic project focused on agricultural market intelligence. The system performs exploratory analysis, dashboarding, forecasting, and anomaly detection for agricultural commodity prices using historical market data.
+from pathlib import Path
 
-This repository is designed to work with a real market dataset supplied later by the project team. The application is built so a CSV file can be placed in `data/raw/` and processed through a reproducible pipeline.
+import numpy as np
+import pandas as pd
+from scipy.stats import chi2_contingency
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
-## Objectives
 
-- analyze price trends and market behavior
-- compare commodity prices across markets
-- detect volatility and unusual movements
-- forecast short-term prices when historical data supports it
-- present results through a Streamlit dashboard and FastAPI backend
-- keep the pipeline flexible for real-world datasets
+def load_raw_data(csv_path: str = "data/raw_agmarknet.csv") -> pd.DataFrame:
+    """Load the raw Agmarknet dataset and normalize column names."""
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Raw dataset not found at '{path}'. Please download the Agmarknet CSV and save it there."
+        )
 
-## Project scope
+    df = pd.read_csv(path)
+    df.columns = [str(col).strip() for col in df.columns]
+    return df
 
-This project supports the following academic components:
 
-- problem definition
-- stakeholder analysis
-- analytical questions
-- data preparation
-- EDA
-- at least five meaningful visualizations
-- machine learning and forecasting
-- anomaly detection
-- dashboard development
-- project report and article outline
+def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean the raw agricultural dataset and standardize values."""
+    cleaned = df.copy()
 
-## Repository structure
+    # Remove duplicate rows
+    cleaned = cleaned.drop_duplicates().reset_index(drop=True)
 
-```text
-AgriMarket-Intelligence/
-├── README.md
-├── LICENSE
-├── .gitignore
-├── .env.example
-├── requirements.txt
-├── pyproject.toml
-├── docker-compose.yml
-├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── README.md
-├── notebooks/
-│   ├── README.md
-│   ├── 01_data_understanding.ipynb
-│   ├── 02_data_cleaning.ipynb
-│   ├── 03_eda.ipynb
-│   ├── 04_feature_engineering.ipynb
-│   ├── 05_model_training.ipynb
-│   └── 06_model_evaluation.ipynb
-├── src/
-│   └── agrimarket/
-│       ├── __init__.py
-│       ├── config/
-│       │   ├── __init__.py
-│       │   └── settings.py
-│       ├── data/
-│       │   ├── __init__.py
-│       │   ├── loader.py
-│       │   ├── validator.py
-│       │   └── preprocessing.py
-│       ├── analysis/
-│       │   ├── __init__.py
-│       │   ├── eda.py
-│       │   ├── statistics.py
-│       │   └── correlations.py
-│       ├── features/
-│       │   ├── __init__.py
-│       │   └── engineering.py
-│       ├── models/
-│       │   ├── __init__.py
-│       │   ├── forecasting.py
-│       │   ├── anomaly_detection.py
-│       │   ├── evaluation.py
-│       │   └── model_registry.py
-│       ├── database/
-│       │   ├── __init__.py
-│       │   ├── connection.py
-│       │   ├── models.py
-│       │   └── repository.py
-│       └── utils/
-│           ├── __init__.py
-│           └── logging_config.py
-├── api/
-│   ├── main.py
-│   ├── schemas.py
-│   └── routes/
-│       ├── __init__.py
-│       ├── health.py
-│       ├── markets.py
-│       ├── commodities.py
-│       ├── analytics.py
-│       ├── forecasts.py
-│       └── anomalies.py
-├── dashboard/
-│   ├── app.py
-│   ├── components/
-│   ├── pages/
-│   └── utils/
-├── models/
-│   └── .gitkeep
-├── tests/
-│   ├── test_data.py
-│   ├── test_features.py
-│   ├── test_models.py
-│   └── test_api.py
-├── scripts/
-│   ├── generate_sample_data.py
-│   ├── ingest_data.py
-│   ├── preprocess_data.py
-│   ├── train_models.py
-│   ├── run_pipeline.py
-│   └── README.md
-├── docs/
-│   ├── architecture.md
-│   ├── data_dictionary.md
-│   ├── ml_methodology.md
-│   ├── dashboard.md
-│   ├── project_scope.md
-│   └── academic_deliverables.md
-├── PROJECT_STATUS.md
-├── .github/
-│   └── workflows/
-│       └── ci.yml
-└── .pytest_cache/
-```
+    # Strip whitespace from object columns
+    for col in cleaned.select_dtypes(include=['object']).columns:
+        cleaned[col] = cleaned[col].astype(str).str.strip()
 
-## Setup
+    # Convert numeric columns to numeric when possible
+    for col in cleaned.columns:
+        if col.lower() in {'area', 'production', 'modal_price', 'yield'}:
+            cleaned[col] = pd.to_numeric(cleaned[col], errors='coerce')
 
-1. Create and activate a Python virtual environment.
-2. Install dependencies:
+    # Standardize common column names if necessary
+    rename_map = {
+        'Area (Hectares)': 'Area',
+        'Production (Tonnes)': 'Production',
+        'Modal Price (Rs./Quintal)': 'Modal_Price',
+        'Crop': 'Crop',
+        'Season': 'Season',
+    }
+    cleaned = cleaned.rename(columns={k: v for k, v in rename_map.items() if k in cleaned.columns})
 
-```bash
-pip install -r requirements.txt
-```
+    # Ensure required columns exist
+    required = {'Area', 'Production', 'Modal_Price', 'Crop', 'Season'}
+    missing = required - set(cleaned.columns)
+    if missing:
+        raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
 
-3. Copy environment variables:
+    # Replace infinite values with NaN and convert to float
+    numeric_cols = cleaned.select_dtypes(include=[np.number]).columns.tolist()
+    for col in numeric_cols:
+        cleaned[col] = cleaned[col].replace([np.inf, -np.inf], np.nan)
 
-```bash
-cp .env.example .env
-```
+    # Fill missing numeric values using median grouped by Crop
+    for col in numeric_cols:
+        if col == 'Crop':
+            continue
+        crop_group_median = cleaned.groupby('Crop')[col].transform('median')
+        cleaned[col] = cleaned[col].fillna(crop_group_median)
+        cleaned[col] = cleaned[col].fillna(cleaned[col].median())
 
-4. Generate sample data for testing:
+    return cleaned
 
-```bash
-python scripts/generate_sample_data.py
-```
 
-5. Run the pipeline:
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Engineer agricultural features used in analysis and modeling."""
+    df = df.copy()
 
-```bash
-python scripts/run_pipeline.py
-```
+    # Prevent divide-by-zero issues
+    df['Yield'] = np.where(df['Area'] > 0, df['Production'] / df['Area'], np.nan)
+    df['Estimated_Revenue_INR'] = df['Production'] * df['Modal_Price']
 
-6. Start the API:
+    # Fill remaining yield gaps using crop-wise median
+    if 'Yield' in df.columns:
+        grouped_yield = df.groupby('Crop')['Yield'].transform('median')
+        df['Yield'] = df['Yield'].fillna(grouped_yield)
+        df['Yield'] = df['Yield'].fillna(df['Yield'].median())
 
-```bash
-uvicorn api.main:app --reload
-```
+    if 'Estimated_Revenue_INR' in df.columns:
+        grouped_revenue = df.groupby('Crop')['Estimated_Revenue_INR'].transform('median')
+        df['Estimated_Revenue_INR'] = df['Estimated_Revenue_INR'].fillna(grouped_revenue)
+        df['Estimated_Revenue_INR'] = df['Estimated_Revenue_INR'].fillna(df['Estimated_Revenue_INR'].median())
 
-7. Start the dashboard:
+    return df
 
-```bash
-streamlit run dashboard/app.py
-```
 
-8. Run tests:
+def pearson_correlation_analysis(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute Pearson correlations for key agricultural metrics."""
+    corr_cols = ['Area', 'Production', 'Yield', 'Modal_Price']
+    corr_df = df[corr_cols].corr(method='pearson')
+    print("\nPearson Correlation Analysis")
+    print(corr_df)
+    return corr_df
 
-```bash
-pytest
-```
 
-## Data placement
+def chi_square_test(df: pd.DataFrame):
+    """Run a Chi-square test of independence between Season and Crop."""
+    contingency = pd.crosstab(df['Season'].astype(str), df['Crop'].astype(str))
+    chi2, p_value, dof, expected = chi2_contingency(contingency)
+    print("\nChi-Square Test of Independence: Season vs Crop")
+    print(f"Chi-square statistic: {chi2:.4f}")
+    print(f"p-value: {p_value:.6f}")
+    print(f"Degrees of freedom: {dof}")
+    return {
+        'chi2': chi2,
+        'p_value': p_value,
+        'dof': dof,
+        'contingency_table': contingency,
+        'expected_table': pd.DataFrame(expected, index=contingency.index, columns=contingency.columns),
+    }
 
-Place the real agricultural market CSV in the following directory:
 
-```text
-data/raw/
-```
+def prepare_model_data(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """Prepare a machine-learning-ready dataset for yield prediction."""
+    model_df = df.copy()
 
-The system includes configurable validation and preprocessing for adapting to the actual dataset schema when it is supplied.
+    # Keep the target and exclude non-predictive ID columns if present
+    exclude_columns = {'Yield', 'Estimated_Revenue_INR'}
 
-## Important notes
+    # Convert categorical variables into dummy indicators
+    for col in ['Season', 'Crop']:
+        if col in model_df.columns:
+            model_df[col] = model_df[col].astype(str).str.strip()
+    model_df = pd.get_dummies(model_df, columns=[col for col in ['Season', 'Crop'] if col in model_df.columns], dtype=float)
 
-- Do not fabricate model results or conclusions.
-- Predictions are support estimates only.
-- Forecasts should not be treated as guaranteed market outcomes.
-- The system is designed to work with real data and a synthetic sample dataset for testing only.
+    feature_columns = [
+        c for c in model_df.columns
+        if c not in exclude_columns and pd.api.types.is_numeric_dtype(model_df[c])
+    ]
 
-## Academic deliverables
+    X = model_df[feature_columns].fillna(model_df[feature_columns].median())
+    y = model_df['Yield'].fillna(model_df['Yield'].median())
+    return X, y
 
-This project documentation includes placeholders for:
 
-- problem definition
-- stakeholder analysis
-- analytical questions
-- EDA outputs
-- insights
-- recommendations
-- unexpected finding documentation
-- project report and article outline
+def train_random_forest_model(df: pd.DataFrame):
+    """Train a Random Forest Regressor and report the yield prediction metrics."""
+    X, y = prepare_model_data(df)
 
-## License
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
 
-MIT License
+    regressor = RandomForestRegressor(
+        n_estimators=300,
+        random_state=42,
+        n_jobs=-1,
+    )
+    regressor.fit(X_train, y_train)
+
+    y_pred = regressor.predict(X_test)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
+
+    feature_importance = pd.Series(regressor.feature_importances_, index=X.columns).sort_values(ascending=False)
+
+    print("\nRandom Forest Regressor for Yield Prediction")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"R^2: {r2:.4f}")
+    print("\nTop Feature Importances:")
+    print(feature_importance.head(10))
+
+    metrics = {
+        'RMSE': rmse,
+        'R2': r2,
+    }
+    return metrics, feature_importance
+
+
+def run_pipeline(csv_path: str = "data/raw_agmarknet.csv", output_path: str = "data/cleaned_agriculture_data.csv") -> pd.DataFrame:
+    """Execute the complete data pipeline and save the cleaned dataset."""
+    raw_df = load_raw_data(csv_path)
+    cleaned_df = clean_dataset(raw_df)
+    cleaned_df = engineer_features(cleaned_df)
+
+    print("\nDataset loaded and cleaned successfully.")
+    print(f"Rows after cleaning: {len(cleaned_df)}")
+
+    pearson_correlation_analysis(cleaned_df)
+    chi_square_test(cleaned_df)
+    train_random_forest_model(cleaned_df)
+
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    cleaned_df.to_csv(output, index=False)
+    print(f"\nCleaned dataset saved to: {output}")
+    return cleaned_df
+
+
+if __name__ == "__main__":
+    run_pipeline()
+
+    print("\nPipeline complete. Use the cleaned Agmarknet dataset in Tableau and the notebook for visualization.")
+    print("Next step: open notebooks/01_dav_analysis.ipynb")
+
+
+
+
+
+
